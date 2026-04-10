@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>A股看盘·全自动美化终极版</title>
+<script src="https://lf3-cdn-tos.bytecdntp.com/cdn/expand/bitable-plugin/v1/bitable-api.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif}
+body{padding:14px;background:#f7f8fa;border-radius:8px}
+.status{font-size:14px;color:#333;margin-bottom:10px;text-align:center}
+.log{font-size:12px;color:#666;margin-top:10px;white-space:pre-line;max-height:240px;overflow-y:auto;padding-right:6px}
+.btn{padding:9px 14px;background:#4E6CDE;color:#fff;border:none;border-radius:8px;cursor:pointer;width:100%;margin-top:6px}
+</style>
+</head>
+<body>
+
+<div class="status" id="status">⚡ 正在全自动美化表格…</div>
+<button class="btn" id="redo">重新执行美化</button>
+<div class="log" id="log"></div>
+
+<script>
+const b = window.BitableSDK;
+let log = [];
+
+async function run() {
+  try {
+    setStatus("获取表格信息…");
+    const table = await b.base.getActiveTable();
+    const fieldIds = await table.getFieldIdList();
+    const fields = [];
+
+    const widthCfg = {
+      text:85, number:70, date:85, datetime:110,
+      checkbox:50, user:85, options:90, link:120,
+      currency:85, percentage:75, autonumber:70, default:85
+    };
+
+    for (const id of fieldIds) {
+      const f = await table.getField(id);
+      const type = await f.getType();
+      fields.push({ id, name: f.name || "", type, field: f });
+    }
+
+    // 1. 列宽
+    setStatus("设置紧凑列宽…");
+    for (const x of fields) await table.setFieldWidth(x.id, widthCfg[x.type] || 85);
+
+    // 2. 对齐 + 涨跌色
+    setStatus("智能对齐与涨跌配色…");
+    for (const x of fields) {
+      const n = x.name;
+      if (["number","currency","percentage","autonumber"].includes(x.type)) {
+        await x.field.setDisplayFormat({ hAlign:"right" });
+        log.push(`✅ ${n} 数字右对齐`);
+      } else if (/代码|编号|ID|证券|股票/.test(n)) {
+        await x.field.setDisplayFormat({ hAlign:"center" });
+        log.push(`✅ ${n} 代码居中`);
+      } else if (["date","datetime"].includes(x.type)) {
+        await x.field.setDisplayFormat({ hAlign:"center" });
+        log.push(`✅ ${n} 日期居中`);
+      } else {
+        await x.field.setDisplayFormat({ hAlign:"left" });
+      }
+
+      if (/涨幅|涨跌|盈亏|收益|变动|振幅|差值/.test(n)) {
+        await x.field.clearConditionalFormat();
+        await x.field.setConditionalFormat({ type:"greater", value:0, textColor:"#F53F3F" });
+        await x.field.setConditionalFormat({ type:"less", value:0, textColor:"#00B42A" });
+        await x.field.setConditionalFormat({ type:"equal", value:0, textColor:"#86909C" });
+        log.push(`🎨 ${n} 红涨绿跌`);
+      }
+    }
+
+    // 3. 冻结表头首列
+    setStatus("冻结表头与首列…");
+    await table.setFrozen({ rowCount:1, columnCount:1 });
+    log.push("🧊 已冻结表头+首列");
+
+    // 4. 智能排序强化：优先 盈亏 > 收益 > 涨幅
+    setStatus("智能按收益/盈亏/涨幅排序…");
+    const sortPriority = [
+      /盈亏|盈利|亏损|总盈亏|累计盈亏/,
+      /收益|收益率/,
+      /涨幅|涨跌幅|涨跌/
+    ];
+    let sortField = null;
+    for (const reg of sortPriority) {
+      sortField = fields.find(f => reg.test(f.name));
+      if (sortField) break;
+    }
+    if (sortField) {
+      await table.setSort([{ fieldId: sortField.id, direction:"descending" }]);
+      log.push(`📈 已按【${sortField.name}】从高到低排序`);
+    }
+
+    // 5. 隐藏冗余列
+    setStatus("隐藏无关冗余列…");
+    const hideList = ["创建人","创建时间","修改人","修改时间","附件","链接","成员","多人","条目标题","关联"];
+    for (const x of fields) {
+      if (hideList.some(k => x.name.includes(k))) {
+        await table.setFieldHidden(x.id, true);
+        log.push(`🙈 隐藏列：${x.name}`);
+      }
+    }
+
+    // 6. 斑马行
+    setStatus("应用斑马条纹行…");
+    try { await table.setRowStylePattern("zebra"); log.push("🦓 斑马行已生效"); } catch (e) {}
+
+    setStatus("✅ 全自动美化完成！");
+  } catch (e) {
+    setStatus("❌ 执行出错：" + e.message);
+    log.push("⚠️ 错误：" + e.message);
+  } finally {
+    document.getElementById("log").textContent = log.join("\n");
+  }
+}
+
+function setStatus(text) {
+  document.getElementById("status").textContent = text;
+}
+
+window.onload = () => { log = []; run(); };
+document.getElementById("redo").onclick = () => { log = []; run(); };
+</script>
+</body>
+</html>
