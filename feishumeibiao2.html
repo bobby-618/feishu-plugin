@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>飞书多维表自动美化</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            padding: 20px; margin: 0; background-color: #f5f7fa;
+        }
+        .container {
+            max-width: 1200px; margin: 0 auto; background: white;
+            padding: 24px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        #runBtn {
+            padding: 8px 16px; background-color: #1677ff; color: white;
+            border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-bottom: 16px;
+        }
+        #runBtn:disabled {
+            background-color: #8c8c8c; cursor: not-allowed;
+        }
+        #log {
+            width: 100%; height: 300px; border: 1px solid #e5e7eb; border-radius: 8px;
+            padding: 10px; overflow-y: auto; font-size: 14px; line-height: 1.5;
+            background-color: #f9fafb; white-space: pre-wrap;
+        }
+        #log > div { margin: 2px 0; line-height: 1.4; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <button id="runBtn" disabled>执行表格美化</button>
+        <div id="log" role="log" aria-live="polite"></div>
+    </div>
+
+    <script src="./bitable-api.js" crossorigin="anonymous"></script>
+
+    <script>
+        (function() {
+            const CONFIG = {
+                HIDDEN_FIELDS: ["创建人", "创建时间", "修改人", "修改时间"],
+                DELAY: { AUTO_RUN: 1000, SDK_CHECK_INTERVAL: 100, SDK_CHECK_TIMEOUT: 5000 },
+                LOG: { MAX_LENGTH: 100, AUTO_SCROLL: true },
+                RETRY: { MAX_RETRIES: 3, BASE_DELAY: 1000 },
+                COLUMN_WIDTH: { CODE: 120, NUMBER: 100, DEFAULT: 150 },
+                ALIGNMENT: { CODE: "center", NUMBER: "right", TEXT: "left" },
+                REGEX: {
+                    CODE_FIELD: /代码|编号|ID|证券|股票/,
+                    RISE_FIELD: /涨幅|涨跌|盈亏|收益/
+                }
+            };
+
+            let isSDKReady = false;
+            let isRunning = false;
+            const runBtn = document.getElementById("runBtn");
+            const logEl = document.getElementById("log");
+
+            // ==============================
+            // ✅ 修复：日志类型安全 + 默认值 + warn 图标
+            // ==============================
+            function logMessage(type, msg) {
+                if (!logEl) return;
+                const prefixes = { success: "✅", info: "ℹ️", error: "❌", warn: "⚠️" };
+                const prefix = prefixes[type] || prefixes.info;
+                const logLine = document.createElement('div');
+                logLine.textContent = `${prefix} ${new Date().toLocaleTimeString()} - ${msg}`;
+                logEl.appendChild(logLine);
+                if (logEl.children.length > CONFIG.LOG.MAX_LENGTH) logEl.removeChild(logEl.firstChild);
+                if (CONFIG.LOG.AUTO_SCROLL) logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            async function executeWithStep(stepName, fn) {
+                logMessage("info", `开始执行：${stepName}`);
+                try {
+                    const result = await fn();
+                    logMessage("success", `完成执行：${stepName}`);
+                    return result;
+                } catch (err) {
+                    logMessage("error", `执行失败【${stepName}】：${err.message}`);
+                    throw err;
+                }
+            }
+
+            async function initSDK() {
+                return executeWithStep("初始化SDK", () => {
+                    if (!window.BitableSDK) throw new Error("SDK 未加载");
+                    const sdk = window.BitableSDK;
+                    if (!sdk?.base?.getActiveBase) throw new Error("SDK 不兼容");
+                    return sdk;
+                });
+            }
+
+            // ==============================
+            // ✅ 修复：Promise.all → allSettled 不中断
+            // ==============================
+            async function setupColumnWidth(table, fields) {
+                return executeWithStep("设置列宽", async () => {
+                    const promises = fields.map(field => {
+                        let width = CONFIG.COLUMN_WIDTH.DEFAULT;
+                        const fname = field.name || "";
+                        if (CONFIG.REGEX.CODE_FIELD.test(fname)) width = CONFIG.COLUMN_WIDTH.CODE;
+                        if (field.type === "number" || field.type === "currency") width = CONFIG.COLUMN_WIDTH.NUMBER;
+                        return table.setFieldWidth(field.id, width);
+                    });
+                    const results = await Promise.allSettled(promises);
+                    results.forEach((res, idx) => {
+                        const fname = fields[idx]?.name || "未知字段";
+                        if (res.status === "fulfilled") logMessage("info", `列【${fname}】宽度已设置`);
+                        else logMessage("error", `列【${fname}】宽度设置失败`);
+                    });
+                });
+            }
+
+            async function setupAlignment(table, fields) {
+                return executeWithStep("设置对齐", async () => {
+                    const promises = fields.map(field => {
+                        let align = CONFIG.ALIGNMENT.TEXT;
+                        const fname = field.name || "";
+                        if (CONFIG.REGEX.CODE_FIELD.test(fname)) align = CONFIG.ALIGNMENT.CODE;
+                        if (field.type === "number" || field.type === "currency") align = CONFIG.ALIGNMENT.NUMBER;
+                        if (field.type === "date" || field.type === "datetime") align = CONFIG.ALIGNMENT.CODE;
+                        return table.setFieldAlign(field.id, align);
+                    });
+                    const results = await Promise.allSettled(promises);
+                    results.forEach((res, idx) => {
+                        const fname = fields[idx]?.name || "未知字段";
+                        if (res.status === "fulfilled") logMessage("info", `列【${fname}】对齐已设置`);
+                        else logMessage("error", `列【${fname}】对齐设置失败`);
+                    });
+                });
+            }
+
+            // ==============================
+            // ✅ 修复：field.name 空指针保护
+            // ==============================
+            async function hideRedundantColumns(table, fields) {
+                return executeWithStep("隐藏冗余列", async () => {
+                    for (const field of fields) {
+                        const cleanName = (field.name || "").trim();
+                        if (CONFIG.HIDDEN_FIELDS.includes(cleanName)) {
+                            await table.setFieldVisible(field.id, false);
+                            logMessage("info", `列【${cleanName}】已隐藏`);
+                        }
+                    }
+                });
+            }
+
+            async function setupConditionalFormat(table, fields) {
+                return executeWithStep("设置涨跌颜色", async () => {
+                    for (const field of fields) {
+                        const fname = field.name || "";
+                        if (field.type === "number" && CONFIG.REGEX.RISE_FIELD.test(fname)) {
+                            if (field.clearConditionalFormat) await field.clearConditionalFormat();
+                            if (field.setConditionalFormat) {
+                                await field.setConditionalFormat([
+                                    { type: "greater", value: 0, textColor: "#F53F3F" },
+                                    { type: "less", value: 0, textColor: "#00B42A" },
+                                    { type: "equal", value: 0, textColor: "#86909C" }
+                                ]);
+                                logMessage("info", `列【${fname}】已设置涨跌色`);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // ==============================
+            // ✅ 修复：竞态条件（原子锁）
+            // ==============================
+            async function runBeautify() {
+                if (isRunning) { logMessage("warn", "任务正在执行，请勿重复点击"); return; }
+                isRunning = true;
+                runBtn.disabled = true;
+                runBtn.textContent = "执行中...";
+
+                try {
+                    const sdk = await initSDK();
+                    const base = await executeWithStep("获取Base", () => sdk.base.getActiveBase());
+                    const table = await executeWithStep("获取表格", () => base.getActiveTable());
+                    const fields = await executeWithStep("获取字段", () => table.getFields());
+
+                    await setupColumnWidth(table, fields);
+                    await setupAlignment(table, fields);
+                    await hideRedundantColumns(table, fields);
+                    await setupConditionalFormat(table, fields);
+
+                    logMessage("success", "✅ 表格美化全部完成！");
+                } catch (err) {
+                    logMessage("error", `❌ 执行失败：${err.message}`);
+                } finally {
+                    isRunning = false;
+                    runBtn.disabled = false;
+                    runBtn.textContent = "重新执行美化";
+                }
+            }
+
+            async function autoRunBeautify() {
+                const startTime = Date.now();
+                while (!isSDKReady && Date.now() - startTime < CONFIG.DELAY.SDK_CHECK_TIMEOUT) {
+                    isSDKReady = !!window.BitableSDK?.base?.getActiveBase;
+                    if (!isSDKReady) await new Promise(r => setTimeout(r, CONFIG.DELAY.CHECK_INTERVAL));
+                }
+                if (isSDKReady && !isRunning) {
+                    logMessage("info", "检测到表格已打开，自动执行美化");
+                    await runBeautify();
+                } else {
+                    logMessage("warn", "SDK 加载超时，可手动点击执行");
+                    runBtn.disabled = false;
+                }
+            }
+
+            runBtn.addEventListener("click", runBeautify);
+            window.addEventListener("load", () => {
+                logMessage("info", "工具已启动，等待SDK就绪");
+                autoRunBeautify();
+            });
+        })();
+    </script>
+</body>
+</html>
